@@ -1,0 +1,103 @@
+import os
+import time
+# Lokale Datei mit Links für Embedding, Openai Token und Tickets
+import constants
+from langchain.retrievers import MultiQueryRetriever
+from langchain_community.document_loaders import WebBaseLoader, TextLoader
+from langchain_community.vectorstores.chroma import Chroma
+from langchain_core.prompts import MessagesPlaceholder, ChatPromptTemplate, SystemMessagePromptTemplate, PromptTemplate, HumanMessagePromptTemplate
+from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain.tools.retriever import create_retriever_tool
+from langchain_openai import ChatOpenAI
+from langchain_openai import OpenAIEmbeddings
+
+# Hilfsfuntkionen
+
+def divide_chunks(l, n=10):
+    """
+    Funktion, die eine Liste l in Stücke der Größe n aufteilt
+    :param l: aufzuteilende Liste
+    :param n: Größe der Sublisten
+    :return: Liste von Listen, die die Ursprungsliste in kleinen Stücken enthält
+    """
+    for i in range(0, len(l), n):
+        yield l[i:i + n]
+
+def loadWebsites(links=web_links, testdata=False, loadSlow=True):
+    """
+    Laden von Websiten + Embedding dieser in einen vorhandenen Vectorstore
+    :param links: Liste von zu embeddenden Websiten
+    :param testdata: Sollen lokale Datein zusätzlich genutzt werden (für Prompt testing)
+    :param loadSlow: Sollen die Webseiten langsamer embedded werden (aufgrund von Tokenlimits in Openai Api)
+    :return: retriever, als Tool für einen Agenten
+    """
+    if testdata:
+        loader2 = TextLoader("./data/data.txt")
+        loader2.load()
+        pages2 = loader2.load()
+        vectorstore.add_documents(pages2)
+    if not loadSlow:
+        loader = WebBaseLoader(links)
+        pages = loader.load_and_split()
+        vectorstore.add_documents(pages)
+    else:
+        # in kleinen Stücken laden, damit die OpenAI Api nicht zu viele Tokens pro Minute embedden muss
+        split_links = list(divide_chunks(links))
+        for i in range(len(split_links)):
+            loader = WebBaseLoader(split_links[i])
+            pages = loader.load_and_split()
+            vectorstore.add_documents(pages)
+            time.sleep(5)
+    retriever = MultiQueryRetriever.from_llm(retriever=vectorstore.as_retriever(), llm=llm)
+    return retriever
+
+# Agenten erstellen
+
+start_time_ges = time.time()
+os.environ["OPENAI_API_KEY"] = constants.APIKEY
+web_links = constants.links_ohneanmelden
+
+llm = ChatOpenAI(model="gpt-4-1106-preview", temperature=0)
+vectorstore = Chroma(embedding_function=OpenAIEmbeddings(), persist_directory="data/embedding/embeddingrun1")
+retriever = loadWebsites()
+tool = create_retriever_tool(retriever, "searchtool", "Searches and returns documents from the documentation.")
+tools = [tool]
+template = 'Take a deep breath. You are a powerfull assistant. Answer the question only with the information provided by the searchtool and do not correct deviating information.'
+prompt = ChatPromptTemplate(input_variables=['agent_scratchpad', 'input'], messages =
+        [SystemMessagePromptTemplate(prompt=PromptTemplate(input_variables=[], template=template)),
+            MessagesPlaceholder(variable_name='chat_history', optional=True),
+         HumanMessagePromptTemplate(prompt=PromptTemplate(input_variables=['input'], template='{input}')),
+            MessagesPlaceholder(variable_name='agent_scratchpad')])
+agent = create_openai_tools_agent(llm=llm, tools=tools, prompt=prompt)
+agent_executor = AgentExecutor(agent=agent, tools=tools)
+vectorstore.persist()
+
+# Agenten mit Tickets zum Testen aufrufen, Zeiten messen und beides in Datei speichern
+
+end_time_ges = time.time()
+f = open("Gpt4turbo_result.txt", "a")
+f.write("Gpt-4 Turbo Testlauf\n")
+# Zeit messen, wie lange das Model zum Starten + Embedden braucht
+f.write("Startzeit: ")
+f.write(str(end_time_ges - start_time_ges))
+f.write("seconds\n")
+f.write("#####################################################################################################")
+f.write("\n")
+f.write("\n")
+tickets = constants.tickets
+for ticket in tickets:
+    start_time = time.time()
+    answer = agent_executor.invoke({"input": ticket})
+    end_time = time.time()
+    f.write("Ticket: ")
+    f.write(ticket)
+    f.write("\n")
+    f.write("Antwort: ")
+    f.write(answer["output"])
+    f.write("\n")
+    # Zeit messen, wie schnell der Agent antwortet.
+    f.write("Zeit in Sekunden: ")
+    f.write(str(end_time - start_time))
+    f.write("\n")
+    f.write("--------------------------------------------------------------------------------------------------\n")
+f.close()
